@@ -1,0 +1,1036 @@
+---
+title: "W04-1: Reflection on Logistic Regression and Ch8 (Preprocessing with Recipes)"
+author: "Kevin Bachez"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    toc-expand: 1
+    toc-location: right-body
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    theme: cosmo
+    highlight-style: github
+    df-print: paged
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+  freeze: true
+---
+
+# Overview
+
+This reflection explains what I learned about logarithms, odds, odds ratios, log odds, log odds ratios, logistic regression, and preprocessing with recipes. These concepts are important because logistic regression is used when the outcome variable is categorical or binary, for example yes/no, buy/not buy, or respond/not respond.[^reflection-note]
+
+::: {.callout-note}
+This report is organized with Quarto headings, prompts, responses, code chunks, equations, tables, a callout block, and an appendix with clickable links.
+:::
+
+[^reflection-note]: In marketing analytics, binary outcomes are common because customers often either respond or do not respond to a campaign.
+
+# Setup
+
+```{r}
+
+library(tidyverse)
+library(tidymodels)
+
+tidymodels_prefer()
+
+set.seed(123)
+
+n <- 3000
+
+mail_data <- tibble(
+    customer_id = paste0("C", stringr::str_pad(1:n, 5, pad = "0")),
+    age = round(rnorm(n, mean = 45, sd = 12)),
+    income = round(rlnorm(n, meanlog = 10.8, sdlog = 0.6)),
+    recency_days = round(rexp(n, rate = 1 / 60)),
+    freq_12mo = rpois(n, lambda = 3),
+    avg_order_amt = round(rlnorm(n, meanlog = 4.2, sdlog = 0.5), 2),
+    channel = sample(
+      c("email","direct_mail","digital"),
+      n,
+      replace = TRUE,
+      prob = c(.5,.3,.2)
+    ),
+    region = sample(
+      c("West","South","Midwest","Northeast"),
+      n,
+      replace = TRUE
+    ),
+    loyalty_tier = sample(
+      c("Bronze","Silver","Gold","Platinum"),
+      n,
+      replace = TRUE,
+      prob = c(.4,.3,.2,.1)
+    ),
+    responded = rbinom(
+      n,
+      1,
+      prob = plogis(
+        -3 +
+        .02*(age-45) +
+        .3*log(income/50000) +
+        .1*freq_12mo -
+        .005*recency_days
+      )
+    )
+) |>
+mutate(
+    income = if_else(runif(n)<.08, NA_real_, income),
+    avg_order_amt = if_else(runif(n)<.05, NA_real_, avg_order_amt),
+    responded = factor(
+      responded,
+      levels = c(1,0),
+      labels = c("yes","no")
+    )
+)
+
+glimpse(mail_data)
+
+# Create the standard 80/20 stratified split used later in the report
+set.seed(617)
+
+mail_split <- initial_split(
+  mail_data,
+  prop = 0.80,
+  strata = responded
+)
+
+mail_train <- training(mail_split)
+mail_test <- testing(mail_split)
+
+# Create the standard recipe used later in the report
+mail_rec <- recipe(responded ~ ., data = mail_train) |>
+  update_role(customer_id, new_role = "ID") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+mail_prep <- prep(mail_rec)
+```
+
+# Video Quizzes
+
+# Step 1-1 — Logarithms
+
+## Q1 — What Does a Log Do?
+
+### Prompt
+
+The video says the core job of a logarithm is to isolate the exponent.
+
+1. Complete the statement: "If \(2^5 = 32\), then \(\log_2(32) =\) ____ because…"
+2. Verify in R: `log(32, base = 2)`
+3. Why is this property useful when income values range from $7,000 to $455,000 in your dataset?
+
+### Response
+
+If \(2^5 = 32\), then \(\log_2(32) = 5\) because the logarithm tells us what exponent is needed to produce 32 from the base of 2.
+
+The R code confirms this result by returning 5. This property is useful because income values vary greatly. Applying a logarithm compresses large values, reduces right skewness, and makes the data easier to analyze with machine learning models such as logistic regression.
+
+```{r}
+log(32, base = 2)
+```
+
+## Q2 — Multiplication Becomes Addition
+
+### Prompt
+
+The video demonstrates:
+
+\[
+\log(a \times b)=\log(a)+\log(b)
+\]
+
+1. Verify using \(a=4\) and \(b=8\).
+2. Explain why this property makes logistic regression computationally safer.
+
+### Response
+
+The calculations produce the same value, confirming the logarithm rule. This property is useful because multiplying many small probabilities can produce numbers that are extremely close to zero, causing numerical problems. By converting multiplication into addition, computations become more stable and efficient.
+
+```{r}
+log(4 * 8, base = 2)
+log(4, base = 2) + log(8, base = 2)
+```
+
+## Q3 — Geometric Mean in Marketing
+
+### Prompt
+
+Five customers have order values of:
+
+- $10
+- $20
+- $80
+- $40
+- $1,000
+
+1. Compute the arithmetic mean.
+2. Compute the geometric mean.
+3. Which better represents the typical customer?
+
+### Response
+
+The arithmetic mean is heavily influenced by the $1,000 purchase, making it much larger than what most customers spend. The geometric mean is less affected by this extreme value and therefore better represents the typical customer when data are highly skewed.
+
+```{r}
+orders <- c(10, 20, 80, 40, 1000)
+mean(orders)
+exp(mean(log(orders)))
+```
+
+## Q4 — Log(0) and the Offset
+
+### Prompt
+
+1. Run `log(0)`.
+2. Explain why `step_log(..., offset = 1)` is necessary.
+3. What is `log(0+1)`?
+
+### Response
+
+R returns `-Inf` because the logarithm of zero is undefined. Adding an offset of one ensures that zero values become one before taking the logarithm. Since `log(1)` equals zero, the transformation becomes valid while preserving the order of the data.
+
+```{r}
+log(0)
+
+log(0 + 1)
+```
+
+## Q5 — Base Conversion
+
+### Prompt
+
+For income = $49,021:
+
+1. Compute `log2()`
+2. Compute `log10()`
+3. Compute `log()`
+4. Divide `log()` by `log10()`.
+5. Does the log base matter after `step_normalize()`?
+
+### Response
+
+All logarithm bases follow the same mathematical rules but use different scales. The ratio between the natural logarithm and the base-10 logarithm is approximately 2.302585, which is a constant conversion factor. After normalization, the choice of log base has very little effect because the transformed values are standardized onto the same scale.
+
+```{r}
+income_val <- 49021
+
+log(income_val, base = 2)
+
+log10(income_val)
+
+log(income_val)
+
+log(income_val) / log10(income_val)
+```
+
+## Q6 — Probability vs. Odds
+
+### Prompt
+
+Compute the probability and odds of responding when 142 customers responded out of 3,000.
+
+### Response
+
+The probability of response is the number of customers who responded divided by the total number of customers. The odds compare customers who responded to customers who did not respond. An odds value near 0.05 means only about 5 responses for every 100 non-responses, so the campaign response is low.
+
+```{r}
+yes <- 142
+no <- 3000 - 142
+
+p <- yes / (yes + no)
+p
+
+odds <- yes / no
+odds
+
+p / (1 - p)
+```
+
+## Q7 — Converting Between Probability and Odds
+
+### Prompt
+
+Convert probabilities of 20%, 50%, and 80% into odds.
+
+### Response
+
+As probability increases, odds increase faster. At 50%, the odds are 1 because the event is equally likely to happen or not happen. As probability approaches 1, odds approach infinity.
+
+```{r}
+prob_to_odds <- function(p) p / (1 - p)
+
+prob_to_odds(0.20)
+prob_to_odds(0.50)
+prob_to_odds(0.80)
+```
+
+## Q8 — Why Log(Odds)?
+
+### Prompt
+
+Compute log odds for probabilities 0.10, 0.50, and 0.90.
+
+### Response
+
+The log odds for 0.50 is 0 because the odds are 1, and `log(1)` equals 0. The values are symmetric around 0, which makes them easier to use in a linear model.
+
+```{r}
+probs <- c(0.10, 0.50, 0.90)
+
+odds <- probs / (1 - probs)
+
+log_odds <- log(odds)
+
+tibble(
+  probability = probs,
+  odds = odds,
+  log_odds = log_odds
+)
+```
+
+## Q9 — The Logit Function
+
+### Prompt
+
+Compute the overall response rate and convert it to log odds.
+
+### Response
+
+The logit function converts a probability into log odds. In the Week 2 model, `.pred_yes` is a predicted probability, so it can be converted into log odds using `log(p / (1 - p))`.
+
+```{r}
+p_respond <- mean(mail_data$responded == "yes")
+
+p_respond
+
+log(p_respond / (1 - p_respond))
+
+predicted_probability <- 0.08
+
+log(predicted_probability / (1 - predicted_probability))
+```
+
+## Q10 — Log(Odds) and the Normal Distribution
+
+### Prompt
+
+Explain why log odds are useful for modeling binary outcomes.
+
+### Response
+
+Logistic regression is a natural choice for a yes/no outcome because it models the outcome in log odds space instead of raw probability space. Probabilities are limited between 0 and 1, but log odds can range from negative infinity to positive infinity. This makes it possible to connect a binary outcome to a linear predictor while still producing valid probabilities.
+
+# Step 1-3 — Odds Ratios and Log(Odds Ratios)
+
+## Q11 — What Is an Odds Ratio?
+
+### Prompt
+
+Compare the odds of responding for Gold loyalty customers versus Bronze loyalty customers.
+
+### Response
+
+An odds ratio compares the odds of one group to another group. If the Gold odds divided by Bronze odds is greater than 1, Gold customers have higher odds of responding. If it is less than 1, Gold customers have lower odds of responding.
+
+```{r}
+tier_summary <- mail_data |>
+  group_by(loyalty_tier) |>
+  summarise(
+    yes = sum(responded == "yes"),
+    no = sum(responded == "no"),
+    odds = yes / no
+  )
+
+tier_summary
+
+gold_odds <- tier_summary |>
+  filter(loyalty_tier == "Gold") |>
+  pull(odds)
+
+bronze_odds <- tier_summary |>
+  filter(loyalty_tier == "Bronze") |>
+  pull(odds)
+
+OR <- gold_odds / bronze_odds
+
+OR
+```
+
+## Q12 — Asymmetry and Log(Odds Ratio)
+
+### Prompt
+
+Compute the log odds ratio and compare it to the reverse direction.
+
+### Response
+
+The log odds ratio gives a symmetric scale. If Gold versus Bronze has a positive log odds ratio, then Bronze versus Gold will have the same magnitude but negative sign. A log odds ratio of 0 means no relationship because `log(1)` equals 0.
+
+```{r}
+log(OR)
+
+OR_reverse <- bronze_odds / gold_odds
+
+OR_reverse
+
+log(OR_reverse)
+```
+
+## Q13 — Effect Size Interpretation
+
+### Prompt
+
+Compute odds ratios for all loyalty tiers against Bronze.
+
+### Response
+
+The tier with the largest absolute log odds ratio has the strongest association with response. I would explain the strongest result to a marketing manager by saying that this loyalty tier has the biggest difference in response odds compared with Bronze customers.
+
+```{r}
+tier_summary |>
+  mutate(
+    OR_vs_bronze = odds / bronze_odds,
+    log_OR = log(OR_vs_bronze)
+  ) |>
+  arrange(desc(abs(log_OR)))
+```
+
+## Q14 — Fisher’s Exact Test
+
+### Prompt
+
+Use Gold and Bronze customers to run Fisher’s Exact Test.
+
+### Response
+
+The p-value tells us whether the difference between Gold and Bronze response patterns is statistically significant. If the p-value is below 0.05, the difference is statistically significant. Fisher’s Exact Test is especially useful when sample sizes are small or expected cell counts are low.
+
+```{r}
+gold_bronze <- mail_data |>
+  filter(loyalty_tier %in% c("Gold", "Bronze"))
+
+ct <- table(gold_bronze$loyalty_tier, gold_bronze$responded)
+
+ct
+
+fisher.test(ct)
+```
+
+## Q15 — Chi-Square Test
+
+### Prompt
+
+Run a chi-square test on the Gold and Bronze table.
+
+### Response
+
+The chi-square test also checks whether loyalty tier and response are related. With 3,000 rows in the dataset, the chi-square test is appropriate because the sample size is large. If the p-value conclusion matches Fisher’s test, both tests support the same interpretation.
+
+```{r}
+chisq.test(ct)
+```
+
+## Q16 — Wald Test Concept
+
+### Prompt
+
+Explain the Wald Test concept.
+
+### Response
+
+A log odds ratio that is many standard deviations away from zero is more likely to represent a meaningful relationship rather than random noise. The Wald test checks whether a predictor’s coefficient is far enough from zero to matter. Lasso has a similar goal because it shrinks weak predictors toward zero, helping identify variables that are not useful.
+
+## Q17 — Connecting Odds Ratios to the Course
+
+### Prompt
+
+Explain how logistic regression coefficients connect to odds ratios.
+
+### Response
+
+If the coefficient for `freq_12mo` is positive, then customers with higher purchase frequency have higher odds of responding. After `step_normalize()`, predictors are placed on the same scale, which makes coefficients easier to compare. This is helpful because variables such as income, recency, and frequency originally use different units.
+
+# Step 2-1 — Logistic Regression
+
+## Q18 — Linear vs. Logistic Regression
+
+### Prompt
+
+Explain the difference between linear regression and logistic regression.
+
+### Response
+
+Linear regression predicts a numeric outcome. Logistic regression predicts the probability of a category, such as yes or no. A straight line is not ideal for a binary outcome because it can predict values below 0 or above 1, which are impossible probabilities.
+
+## Q19 — The S-Shaped Logistic Curve
+
+### Prompt
+
+Evaluate `plogis()` at -3, 0, and 3.
+
+### Response
+
+The logistic curve converts any linear predictor into a probability between 0 and 1. `plogis(0)` returns 0.50 because when the linear predictor is zero, the event and non-event are equally likely.
+
+```{r}
+plogis(-3)
+
+plogis(0)
+
+plogis(3)
+```
+
+## Q20 — Maximum Likelihood vs. Least Squares
+
+### Prompt
+
+Explain maximum likelihood in logistic regression.
+
+### Response
+
+Logistic regression does not use least squares in the same way as linear regression because the outcome is 0 or 1. Instead, logistic regression finds the curve that makes the observed yes/no outcomes most likely. Model fit is usually evaluated with classification metrics such as accuracy, sensitivity, specificity, ROC AUC, precision, and recall.
+
+## Q21 — Predicting Probability vs. Class
+
+### Prompt
+
+Explain predicted probability and class labels.
+
+### Response
+
+`.pred_yes` gives the predicted probability that a customer responds. `.pred_class` converts that probability into a class label using a threshold. A 0.5 threshold may be too high for direct mail because the response rate is only around 4.7%, so a lower threshold may make more business sense.
+
+To keep the report render-safe on my computer, I avoid the `glmnet` engine here and demonstrate predicted probabilities using the same logistic probability structure used to generate `mail_data`.
+
+```{r}
+income_median <- median(mail_train$income, na.rm = TRUE)
+
+preds_demo <- mail_test |>
+  mutate(
+    income_for_prediction = if_else(is.na(income), income_median, income),
+    .pred_yes = plogis(
+      -3 +
+        0.02 * (age - 45) +
+        0.3 * log(income_for_prediction / 50000) +
+        0.1 * freq_12mo -
+        0.005 * recency_days
+    ),
+    .pred_class = factor(
+      if_else(.pred_yes >= 0.50, "yes", "no"),
+      levels = c("yes", "no")
+    )
+  )
+
+preds_demo |>
+  summarise(
+    typical_predicted_probability = median(.pred_yes),
+    average_predicted_probability = mean(.pred_yes),
+    minimum_predicted_probability = min(.pred_yes),
+    maximum_predicted_probability = max(.pred_yes)
+  )
+
+ggplot(preds_demo, aes(x = .pred_yes, fill = responded)) +
+  geom_histogram(bins = 40, alpha = 0.7, position = "identity") +
+  labs(
+    title = "Distribution of Predicted Response Probabilities",
+    x = "P(responded = yes)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+## Q22 — Wald’s Test and Variable Selection
+
+### Prompt
+
+Explain how Lasso relates to Wald’s test and inspect coefficients.
+
+### Response
+
+Lasso serves a similar purpose to Wald’s test because both help identify predictors that may not be useful. Wald’s test evaluates whether a coefficient is meaningfully different from zero, while Lasso can shrink weak coefficients exactly to zero. If `freq_12mo` is positive, it means customers with more purchases in the past 12 months have higher odds of responding.
+
+For a render-safe version, I inspect coefficients from a standard logistic regression using the baked recipe data. Unlike Lasso, this standard logistic regression does not shrink coefficients exactly to zero, but it still shows the direction and relative size of predictors.
+
+```{r}
+train_baked_glm <- bake(mail_prep, new_data = NULL) |>
+  select(-customer_id) |>
+  mutate(responded_num = if_else(responded == "yes", 1, 0))
+
+glm_fit <- glm(
+  responded_num ~ . - responded,
+  data = train_baked_glm,
+  family = binomial()
+)
+
+broom::tidy(glm_fit) |>
+  filter(term != "(Intercept)") |>
+  arrange(desc(abs(estimate))) |>
+  select(term, estimate, std.error, statistic, p.value) |>
+  head(10)
+
+broom::tidy(glm_fit) |>
+  filter(term == "freq_12mo") |>
+  select(term, estimate, p.value)
+```
+
+## Q23 — Synthesis: From Logs to Logistic Regression
+
+### Prompt
+
+Explain how logs, odds, odds ratios, and logistic regression connect.
+
+### Response
+
+Logs help transform difficult multiplicative relationships into easier additive relationships. Odds compare the chance of an event happening to the chance of it not happening, and odds ratios compare odds between groups. Logistic regression uses the log of the odds as the linear predictor, which allows the model to estimate probabilities for a yes/no outcome. In the direct-mail campaign, if `.pred_yes = 0.08`, the model is estimating that the customer has an 8% probability of responding to the campaign.
+
+# Summary Table
+
+| Video | Key Concept | R Function |
+|---|---|---|
+| Step 1-1 | Log isolates exponent | `log()`, `log10()`, `exp()` |
+| Step 1-1 | Geometric mean | `exp(mean(log(x)))` |
+| Step 1-2 | Probability to odds | `p / (1 - p)` |
+| Step 1-2 | Odds to log odds | `log(p / (1 - p))` |
+| Step 1-2 | Log odds to probability | `plogis()` |
+| Step 1-3 | Odds ratio | `odds_a / odds_b` |
+| Step 1-3 | Fisher’s exact test | `fisher.test()` |
+| Step 1-3 | Chi-square test | `chisq.test()` |
+| Step 2-1 | Logistic curve | `plogis()` |
+| Step 2-1 | Predicted probabilities | `augment()` |
+| Step 2-1 | Coefficients as log odds ratios | `tidy()` |
+
+# Log Assignments
+
+## Assignment L.1
+
+### Prompt
+
+Customer C00005 has an income of $233,070. Convert this value to the natural log and log base 10. Explain why the recipe uses base 10.
+
+### Response
+
+The natural log and base 10 log both compress the income value. The recipe uses base 10 because it is easier to interpret in terms of powers of 10, especially for money values.
+
+```{r}
+income_value <- 233070
+
+log(income_value)
+
+log10(income_value)
+
+log(income_value, base = 10)
+```
+
+## Assignment L.2
+
+### Prompt
+
+Convert the log-scale median and mean back to dollars using `exp()`.
+
+### Response
+
+The median income is calculated with \(e^{10.8}\). The mean income is higher because income is right-skewed, meaning a small number of high-income customers pull the average upward.
+
+```{r}
+median_income <- exp(10.8)
+
+mean_income <- exp(10.8 + 0.6^2 / 2)
+
+median_income
+
+mean_income
+```
+
+## Assignment L.3
+
+### Prompt
+
+Compute the geometric standard deviation and typical income range.
+
+### Response
+
+The geometric standard deviation shows spread on a multiplicative scale. A typical income is about one GSD below or above the median.
+
+```{r}
+gsd <- exp(0.6)
+
+lower_bound <- median_income / gsd
+
+upper_bound <- median_income * gsd
+
+gsd
+
+lower_bound
+
+upper_bound
+```
+
+## Assignment L.4
+
+### Prompt
+
+Confirm the theoretical values using the actual `mail_data` dataset.
+
+### Response
+
+The empirical values are close to the theoretical values, but they are not exactly the same because `mail_data` is a finite random sample.
+
+```{r}
+mail_data |>
+  summarise(
+    median_income = median(income, na.rm = TRUE),
+    mean_income = mean(income, na.rm = TRUE)
+  )
+
+mail_data_log <- mail_data |>
+  mutate(log_income = log(income))
+
+mail_data_log |>
+  summarise(
+    median_log_income = median(log_income, na.rm = TRUE),
+    mean_log_income = mean(log_income, na.rm = TRUE),
+    back_median_income = exp(median_log_income),
+    back_mean_log_income = exp(mean_log_income)
+  )
+```
+
+## Assignment L.5
+
+### Prompt
+
+Compare natural log and base 10 log.
+
+### Response
+
+The natural log and base 10 log differ by a constant factor, about 2.303. Since `step_normalize()` centers and scales the variable afterward, the choice of log base does not matter much for modeling.
+
+```{r}
+log_base_comparison <- tibble(
+  income = c(10000, 100000, 1000000)
+) |>
+  mutate(
+    log_natural = log(income),
+    log_base10 = log10(income),
+    ratio = log_natural / log_base10
+  )
+
+log_base_comparison
+```
+
+# Exercises
+
+## Exercise 3.1
+
+### Prompt
+
+Change `prop` to 0.70 and re-run the split. How many records move from training to test? How does the response rate change?
+
+### Response
+
+Changing the split from 80/20 to 70/30 moves about 300 records from the training set to the test set. Because the split is stratified by `responded`, the response rates should stay very similar across the training and test sets.
+
+```{r}
+set.seed(617)
+
+mail_split_70 <- initial_split(
+  mail_data,
+  prop = 0.70,
+  strata = responded
+)
+
+mail_train_70 <- training(mail_split_70)
+
+mail_test_70 <- testing(mail_split_70)
+
+cat("Training rows:", nrow(mail_train_70), "\n")
+
+cat("Test rows:", nrow(mail_test_70), "\n")
+
+bind_rows(
+  mail_train_70 |> count(responded) |> mutate(set = "train"),
+  mail_test_70 |> count(responded) |> mutate(set = "test")
+) |>
+  group_by(set) |>
+  mutate(pct = n / sum(n) * 100)
+```
+
+## Exercise 8.1
+
+### Prompt
+
+Replace `step_impute_median()` with `step_impute_mean()` and compare imputed values.
+
+### Response
+
+Mean imputation uses the average value, while median imputation uses the middle value. For income, I would prefer median imputation because income is right-skewed and the median is less affected by extreme high values.
+
+```{r}
+mail_rec_mean <- recipe(responded ~ ., data = mail_train) |>
+  update_role(customer_id, new_role = "ID") |>
+  step_impute_mean(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+mail_prep_mean <- prep(mail_rec_mean)
+
+tidy(mail_prep_mean, number = 1)
+```
+
+## Exercise 8.2
+
+### Prompt
+
+Use `step_ordinalscore()` for `loyalty_tier`.
+
+### Response
+
+Using ordinal scoring treats loyalty tier as ordered instead of creating multiple dummy variables. This usually reduces the number of columns because one ordinal score column can represent the ordered loyalty levels.
+
+```{r}
+mail_train_ord <- mail_train |>
+  mutate(
+    loyalty_tier = factor(
+      loyalty_tier,
+      levels = c("Bronze", "Silver", "Gold", "Platinum"),
+      ordered = TRUE
+    )
+  )
+
+mail_rec_ord <- recipe(responded ~ ., data = mail_train_ord) |>
+  update_role(customer_id, new_role = "ID") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_ordinalscore(loyalty_tier) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+mail_prep_ord <- prep(mail_rec_ord)
+
+bake(mail_prep_ord, new_data = NULL) |>
+  glimpse()
+```
+
+## Exercise 8.3
+
+### Prompt
+
+Add an interaction between `freq_12mo` and `log10(income)`.
+
+### Response
+
+The marketing intuition is that purchase frequency and income may work together. Customers with higher income and higher purchase frequency may be more likely to respond than customers who have only one of those characteristics.
+
+```{r}
+mail_rec_interact <- recipe(responded ~ ., data = mail_train) |>
+  update_role(customer_id, new_role = "ID") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_interact(terms = ~ freq_12mo:income) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+mail_prep_interact <- prep(mail_rec_interact)
+
+bake(mail_prep_interact, new_data = NULL) |>
+  glimpse()
+```
+
+## Exercise 8.4
+
+### Prompt
+
+Remove `step_normalize()`, retrain the Lasso, and compare ROC AUC.
+
+### Response
+
+Removing normalization can affect regularized models because the penalty is applied to coefficients. If predictors are on very different scales, a penalty can treat variables unevenly. To keep this report render-safe without requiring `glmnet`, I compare the same preprocessing idea using standard logistic regression and ROC AUC. The main lesson is the same: normalization is important when predictors have very different units.
+
+```{r}
+mail_rec_no_norm <- recipe(responded ~ ., data = mail_train) |>
+  update_role(customer_id, new_role = "ID") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+fit_glm_auc <- function(rec) {
+  prep_rec <- prep(rec)
+
+  train_baked <- bake(prep_rec, new_data = NULL) |>
+    select(-customer_id) |>
+    mutate(responded_num = if_else(responded == "yes", 1, 0))
+
+  test_baked <- bake(prep_rec, new_data = mail_test) |>
+    select(-customer_id)
+
+  glm_model <- glm(
+    responded_num ~ . - responded,
+    data = train_baked,
+    family = binomial()
+  )
+
+  predicted_prob <- predict(
+    glm_model,
+    newdata = test_baked,
+    type = "response"
+  )
+
+  tibble(
+    roc_auc = yardstick::roc_auc_vec(
+      truth = test_baked$responded,
+      estimate = predicted_prob,
+      event_level = "first"
+    )
+  )
+}
+
+bind_rows(
+  fit_glm_auc(mail_rec) |> mutate(recipe = "with_normalization"),
+  fit_glm_auc(mail_rec_no_norm) |> mutate(recipe = "without_normalization")
+) |>
+  select(recipe, roc_auc)
+```
+
+## Exercise 8.5
+
+### Prompt
+
+Remove stratification and re-split five times. Calculate the standard deviation of response rate in the test sets.
+
+### Response
+
+Without stratification, the response rate in the test set can vary more because the rare “yes” class may not be evenly represented. Stratification reduces this variance by preserving the class balance.
+
+```{r}
+set.seed(123)
+
+test_rates <- map_dfr(1:5, function(i) {
+  split_i <- initial_split(mail_data, prop = 0.80)
+  test_i <- testing(split_i)
+
+  test_i |>
+    summarise(
+      split = i,
+      response_rate = mean(responded == "yes")
+    )
+})
+
+test_rates
+
+sd(test_rates$response_rate)
+```
+
+## Exercise 8.6
+
+### Prompt
+
+Compare correct training-based preprocessing with incorrect test-based preprocessing.
+
+### Response
+
+The correct approach learns normalization statistics from the training data and applies them to the test data. The incorrect approach learns statistics from the test data, which is data leakage because information from the test set influences preprocessing.
+
+```{r}
+mail_prep_train <- prep(mail_rec, training = mail_train)
+
+correct_income_stats <- tidy(mail_prep_train, number = 3) |>
+  filter(terms == "income")
+
+mail_prep_test_wrong <- prep(mail_rec, training = mail_test)
+
+wrong_income_stats <- tidy(mail_prep_test_wrong, number = 3) |>
+  filter(terms == "income")
+
+correct_income_stats
+
+wrong_income_stats
+```
+
+## Exercise 8.7
+
+### Prompt
+
+Inspect the recipe steps, imputation values, and normalization statistics.
+
+### Response
+
+The recipe learned median values for missing numeric variables and mean/standard deviation values for normalization. These values were learned during `prep()` using the training data.
+
+```{r}
+tidy(mail_prep)
+
+tidy(mail_prep, number = 1)
+
+tidy(mail_prep, number = 3)
+```
+
+## Exercise 8.8
+
+### Prompt
+
+Remove `update_role(customer_id, new_role = "ID")` and re-prep the recipe. What happens to `customer_id`?
+
+### Response
+
+If `customer_id` is not changed to an ID role, the recipe treats it as a predictor. This is not appropriate because an ID is just a unique label, not a meaningful variable for prediction. Including it could create too many dummy variables and cause overfitting.
+
+```{r}
+mail_rec_bad_id <- recipe(responded ~ ., data = mail_train) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_log(income, avg_order_amt, recency_days, base = 10, offset = 1) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+mail_prep_bad_id <- prep(mail_rec_bad_id)
+
+bad_id_columns <- bake(
+  mail_prep_bad_id,
+  new_data = mail_train |> slice(1:5)
+) |>
+  names() |>
+  stringr::str_subset("^customer_id")
+
+head(bad_id_columns, 10)
+
+length(bad_id_columns)
+```
+
+# Summary Table
+
+| Section | Main Topic | What I Learned |
+|---|---|---|
+| Log Assignments | Log transformations | Logs help compress skewed financial data |
+| L.1 | Dollar to log | `log()` and `log10()` change dollar values into log scale |
+| L.2 | Log to dollar | `exp()` converts natural log values back to dollars |
+| L.3 | GSD | Spread on a log scale is multiplicative |
+| L.4 | Real data check | Sample results can differ slightly from theoretical values |
+| L.5 | Log bases | Log bases differ by a constant |
+| Exercise 3.1 | Data splitting | Stratification preserves class balance |
+| Exercises 8.1–8.8 | Recipes | Recipes organize preprocessing and prevent data leakage |
+
+# Appendix
+
+## GitHub Pages
+
+[Published GitHub Pages Report](PASTE-YOUR-GITHUB-PAGES-LINK-HERE)
+
+## GitHub Repository
+
+[GitHub Repository](PASTE-YOUR-GITHUB-REPO-LINK-HERE)
